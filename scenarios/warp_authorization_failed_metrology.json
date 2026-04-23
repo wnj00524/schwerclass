@@ -1,0 +1,193 @@
+{
+  "metadata": {
+    "name": "warp_authorization_failed_metrology",
+    "seed": 42,
+    "modes": [
+      "Operations",
+      "Engineering",
+      "Maintenance",
+      "Training",
+      "IncidentReplay"
+    ],
+    "description": "warp authorization failed metrology"
+  },
+  "state": {
+    "time_s": 0.0,
+    "main_power": {
+      "name": "main",
+      "electrical_mw": 48.0,
+      "thermal_load_mw": 31.0,
+      "thermal_rejection_mw": 39.0,
+      "bus_isolated": false
+    },
+    "propulsion_power": {
+      "name": "propulsion",
+      "electrical_mw": 62.0,
+      "thermal_load_mw": 50.0,
+      "thermal_rejection_mw": 57.0,
+      "bus_isolated": false
+    },
+    "warp_power": {
+      "name": "warp",
+      "electrical_mw": 0.0,
+      "thermal_load_mw": 8.0,
+      "thermal_rejection_mw": 14.0,
+      "bus_isolated": false
+    },
+    "main_reactor": {
+      "output_mw": 48.0,
+      "max_mw": 60.0,
+      "derate": 1.0,
+      "cryo_ready": true,
+      "isotope_ratio": 1.0,
+      "maintenance_due_hours": 2000.0
+    },
+    "propulsion_reactor": {
+      "output_mw": 62.0,
+      "max_mw": 90.0,
+      "derate": 1.0,
+      "cryo_ready": true,
+      "isotope_ratio": 1.0,
+      "maintenance_due_hours": 2000.0
+    },
+    "propulsion": {
+      "mode": "cruise",
+      "hydrogen_kg": 180000.0,
+      "thrust_kn": 420.0,
+      "hot_section_temp_c": 640.0,
+      "nozzle_health": 1.0,
+      "plasma_stability": 1.0,
+      "online": true
+    },
+    "thermal_loops": {
+      "main": {
+        "name": "main",
+        "load_mw": 31.0,
+        "reject_mw": 39.0,
+        "isolated_segments": 0,
+        "total_segments": 6
+      },
+      "propulsion": {
+        "name": "propulsion",
+        "load_mw": 50.0,
+        "reject_mw": 57.0,
+        "isolated_segments": 0,
+        "total_segments": 6
+      },
+      "warp": {
+        "name": "warp",
+        "load_mw": 8.0,
+        "reject_mw": 14.0,
+        "isolated_segments": 0,
+        "total_segments": 6
+      },
+      "emergency": {
+        "name": "emergency",
+        "load_mw": 0.0,
+        "reject_mw": 10.0,
+        "isolated_segments": 0,
+        "total_segments": 6
+      }
+    },
+    "tritium_inventory_kg": 430.0,
+    "tritium_contamination_grams": 0.0,
+    "cargo": {
+      "mass_tonnes": 28000.0,
+      "centroid_m": 0.1,
+      "pitch_moment": 80.0,
+      "yaw_moment": 45.0,
+      "roll_moment": 50.0,
+      "ballast_state": 0.1,
+      "geometry_ok": false
+    },
+    "warp": {
+      "antimatter_cartridges": 4,
+      "train_ready": false,
+      "conversion_online": true,
+      "bulk_storage_gj": 0.0,
+      "pulse_network_ready": true,
+      "bow_nucleation_ready": true,
+      "capture_ring_ready": true,
+      "ring_stations_ready": 8,
+      "stage": "idle",
+      "auth_reason": "",
+      "armed": false
+    },
+    "eccs": {
+      "habitat": {
+        "name": "habitat",
+        "o2_kpa": 21.1,
+        "co2_kpa": 0.45,
+        "humidity_pct": 45.0,
+        "pressure_kpa": 101.2,
+        "contamination_ppm": 20.0
+      },
+      "cargo": {
+        "name": "cargo",
+        "o2_kpa": 20.0,
+        "co2_kpa": 0.5,
+        "humidity_pct": 55.0,
+        "pressure_kpa": 100.8,
+        "contamination_ppm": 60.0
+      },
+      "process": {
+        "name": "process",
+        "o2_kpa": 19.5,
+        "co2_kpa": 0.7,
+        "humidity_pct": 60.0,
+        "pressure_kpa": 100.0,
+        "contamination_ppm": 140.0
+      },
+      "comfort_mode": true,
+      "emergency_mode": false
+    },
+    "scrubber": {
+      "beds_total": 4,
+      "beds_ready": 4,
+      "poisoning": 0.0,
+      "regen_quality": 1.0
+    },
+    "getter": {
+      "uptake_capacity": 1.0,
+      "used_fraction": 0.5,
+      "poisoning": 0.0,
+      "pressure_drop": 0.1,
+      "jam_risk": 0.1,
+      "spring_travel_ok": true
+    },
+    "o2_rack": {
+      "cassette_total": 6,
+      "cassette_online": 6,
+      "branch_bypass_open": false,
+      "purity": 0.995
+    },
+    "air_handler": {
+      "blower_health": 1.0,
+      "condensate_ok": true,
+      "enabled": true
+    },
+    "lighting": {
+      "egress_routes": 3,
+      "lit_egress_routes": 3,
+      "emergency_path_independent": true,
+      "branch_failures": 0
+    },
+    "signaling": {
+      "dsc_online": true,
+      "emergency_signaling_visible": true
+    },
+    "seating": {
+      "mount_health": 1.0,
+      "damper_health": 1.0,
+      "restraint_health": 1.0
+    },
+    "bunk": {
+      "branches": 8,
+      "blocked_branches": 0,
+      "local_co2_rise": 0.0
+    },
+    "alarms": [],
+    "maintenance": {},
+    "sandbox": false
+  }
+}
