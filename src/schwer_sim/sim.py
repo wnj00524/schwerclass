@@ -1,228 +1,194 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from .core import DeterministicEngine
-from .model import SimulationState
+from .model import (
+    BunkArrayComponent,
+    EccsComponent,
+    FailureSeverity,
+    LightingComponent,
+    MaintenanceState,
+    ScenarioEvent,
+    SignalingComponent,
+    SimulationModel,
+    WarpComponent,
+)
+
+
+class ElectricalDomainSolver:
+    def solve(self, model: SimulationModel) -> None:
+        main = model.domains["main"]
+        eccs: EccsComponent = model.ship.systems["eccs"]  # type: ignore[assignment]
+        demand = 2.2 if eccs.air_handler_enable else 1.0
+        main.electrical_mw = max(0.0, 48.0 - demand * (1.0 - eccs.health))
+
+
+class ThermalDomainSolver:
+    def solve(self, model: SimulationModel) -> None:
+        global_rejection = sum(d.thermal_rejection_mw for d in model.domains.values())
+        global_load = sum(d.thermal_load_mw for d in model.domains.values())
+        if global_load > global_rejection:
+            model.alarms.append("GLOBAL_THERMAL_REJECTION_LIMIT")
+        eccs: EccsComponent = model.ship.systems["eccs"]  # type: ignore[assignment]
+        model.domains["main"].thermal_load_mw = 30.0 + (0.8 if eccs.air_handler_cooling else 0.2)
+        eccs.thermal_margin = model.domains["main"].thermal_margin_mw
+
+
+class AtmosphereDomainSolver:
+    def solve(self, model: SimulationModel) -> None:
+        eccs: EccsComponent = model.ship.systems["eccs"]  # type: ignore[assignment]
+        bas: BunkArrayComponent = model.ship.systems["bas"]  # type: ignore[assignment]
+        if not eccs.cassette_enable:
+            model.alarms.append("O2_CASSETTE_INTERLOCK_OPEN")
+        if not eccs.air_handler_cooling:
+            model.alarms.append("AHU_COOLING_OFF")
+        if not bas.pressure_hierarchy_preserved:
+            model.alarms.append("BAS_PRESSURE_HIERARCHY_FAULT")
+
+
+class PropellantDomainSolver:
+    def solve(self, model: SimulationModel) -> None:
+        return
+
+
+class WarpEnergyDomainSolver:
+    def solve(self, model: SimulationModel) -> None:
+        warp: WarpComponent = model.ship.systems["warp"]  # type: ignore[assignment]
+        thermal_violation = model.domains["warp"].thermal_margin_mw < 0.5
+        warp.staged_abort(thermal_violation)
+        if warp.stage == "abort_stage_b":
+            model.alarms.append("WARP_ABORT_STAGE_B")
+
+
+class ControlEngine:
+    def run(self, model: SimulationModel) -> None:
+        for component in model.ship.systems.values():
+            component.evaluate_sensors()
+            component.evaluate_control()
+        lighting: LightingComponent = model.ship.systems["lighting"]  # type: ignore[assignment]
+        sdss: SignalingComponent = model.ship.systems["sdss"]  # type: ignore[assignment]
+        if lighting.lit_critical_routes < 1:
+            model.alarms.append("LIGHTING_CRITICAL_ROUTE_LOSS")
+        if not sdss.emergency_visible:
+            model.alarms.append("SDSS_SAFETY_PATH_UNAVAILABLE")
+
+
+class FailureEngine:
+    def run(self, model: SimulationModel) -> None:
+        for component in model.ship.systems.values():
+            component.accumulate_wear()
+            component.evaluate_failures()
+            if component.failure.severity == FailureSeverity.FAILED:
+                model.alarms.append(f"{component.id.upper()}_FAILED")
+
+
+class MaintenanceEngine:
+    def run(self, model: SimulationModel) -> None:
+        dt_h = model.dt_seconds / 3600.0
+        for component in model.ship.systems.values():
+            component.maintenance.tick(dt_h)
+            if component.maintenance.state == MaintenanceState.SCHEDULED:
+                model.alarms.append(f"{component.id.upper()}_MAINTENANCE_DUE")
+
+
+class EventEngine:
+    def __init__(self, engine: DeterministicEngine, model: SimulationModel) -> None:
+        self.engine = engine
+        self.model = model
+        self.engine.register_handler("scenario_event", self._handle_event)
+
+    def schedule(self, event: ScenarioEvent) -> None:
+        self.engine.schedule(event.tick, "scenario_event", event.payload)
+
+    def _handle_event(self, payload: dict[str, object]) -> None:
+        event_type = str(payload.get("event_type", ""))
+        eccs: EccsComponent = self.model.ship.systems["eccs"]  # type: ignore[assignment]
+        if event_type == "eccs_leak":
+            eccs.no_leak = False
+        elif event_type == "lighting_branch_loss":
+            lighting: LightingComponent = self.model.ship.systems["lighting"]  # type: ignore[assignment]
+            lighting.failed_branches += 1
+        elif event_type == "dsc_failure":
+            sdss: SignalingComponent = self.model.ship.systems["sdss"]  # type: ignore[assignment]
+            sdss.dsc_online = False
+        elif event_type == "maintenance_begin":
+            eccs.maintenance.begin()
+        elif event_type == "maintenance_complete":
+            eccs.maintenance.complete()
+        elif event_type == "warp_align":
+            warp: WarpComponent = self.model.ship.systems["warp"]  # type: ignore[assignment]
+            if warp.authorized():
+                warp.stage = "aligned"
+        elif event_type == "isolate_interface":
+            group = str(payload.get("group", ""))
+            for edge in self.model.interfaces:
+                if edge.redundancy_group == group and edge.isolation_capability:
+                    edge.isolated = True
 
 
 @dataclass
-class SnapshotManager:
-    checkpoints: list[dict[str, Any]] = field(default_factory=list)
+class SimulationRunner:
+    model: SimulationModel
+    seed: int = 7
 
-    def save_checkpoint(self, state: SimulationState) -> None:
-        self.checkpoints.append(state.to_dict())
-        self.checkpoints = self.checkpoints[-8:]
-
-    def rewind(self, state: SimulationState) -> SimulationState:
-        if not self.checkpoints:
-            return state
-        return SimulationState.from_dict(self.checkpoints[-1])
-
-
-class SchwerSimulation:
-    def __init__(self, seed: int = 7, dt_seconds: float = 1.0, state: SimulationState | None = None) -> None:
-        self.state = state or SimulationState()
-        self.engine = DeterministicEngine(dt_seconds=dt_seconds, seed=seed)
-        self.snapshots = SnapshotManager()
-        self._register_handlers()
-
-    def _register_handlers(self) -> None:
-        self.engine.register_handler("inject_fault", self._inject_fault)
-        self.engine.register_handler("schedule_maintenance", self._schedule_maintenance)
+    def __post_init__(self) -> None:
+        self.engine = DeterministicEngine(dt_seconds=self.model.dt_seconds, seed=self.seed)
+        self.control = ControlEngine()
+        self.failure = FailureEngine()
+        self.maintenance = MaintenanceEngine()
+        self.event = EventEngine(self.engine, self.model)
+        self.electrical = ElectricalDomainSolver()
+        self.thermal = ThermalDomainSolver()
+        self.atmosphere = AtmosphereDomainSolver()
+        self.propellant = PropellantDomainSolver()
+        self.warp_energy = WarpEnergyDomainSolver()
 
     def step(self, steps: int = 1) -> None:
         for _ in range(steps):
+            self.model.alarms.clear()
             self.engine.step()
-            self.state.time_s += self.engine.dt_seconds
-            self._advance_subsystems()
-            if self.engine.tick % 60 == 0:
-                self.snapshots.save_checkpoint(self.state)
+            self.control.run(self.model)
+            self.thermal.solve(self.model)
+            self.electrical.solve(self.model)
+            self.atmosphere.solve(self.model)
+            self.propellant.solve(self.model)
+            self.warp_energy.solve(self.model)
+            self.failure.run(self.model)
+            self.maintenance.run(self.model)
+            self.model.tick += 1
 
-    def _advance_subsystems(self) -> None:
-        self.state.alarms.clear()
-        self._advance_thermal()
-        self._advance_main_power()
-        self._advance_tritium()
-        self._advance_propulsion()
-        self._advance_eccs()
-        self._advance_scrubber_and_getter()
-        self._advance_o2()
-        self._advance_lighting_and_signaling()
-        self._advance_hab_modules()
-        self._evaluate_warp_authorization()
 
-    def _advance_thermal(self) -> None:
-        for name, loop in self.state.thermal_loops.items():
-            if name == "propulsion":
-                loop.load_mw = 20.0 + self.state.propulsion.thrust_kn / 20.0
-            if name == "warp" and self.state.warp.armed:
-                loop.load_mw = 12.0 + self.state.warp.bulk_storage_gj / 200.0
-            margin = loop.margin
-            if margin < 0:
-                self.state.alarms.append(f"THERMAL_DERATE_{name.upper()}")
+class SchwerSimulation:
+    """Compatibility wrapper over V2 SimulationRunner."""
 
-    def _advance_main_power(self) -> None:
-        loop_margin = self.state.thermal_loops["main"].margin
-        derate = 1.0
-        if loop_margin < 2.0:
-            derate *= max(0.5, 0.7 + loop_margin / 10.0)
-        if self.state.main_reactor.isotope_ratio < 0.95:
-            derate *= 0.92
-        if self.state.tritium_contamination_grams > 60:
-            derate *= 0.85
-        self.state.main_reactor.derate = derate
-        self.state.main_power.electrical_mw = self.state.main_reactor.max_mw * derate * 0.8
-        self.state.main_power.thermal_load_mw = 25 + (1 - derate) * 8
+    def __init__(self, seed: int = 7, dt_seconds: float = 1.0, model: SimulationModel | None = None) -> None:
+        self.model = model or SimulationModel(dt_seconds=dt_seconds)
+        self.runner = SimulationRunner(self.model, seed=seed)
+        self.engine = self.runner.engine
 
-    def _advance_tritium(self) -> None:
-        rng = self.engine.rng
-        drift = 0.00002 * (1.0 + rng.random() * 0.1)
-        self.state.main_reactor.isotope_ratio = max(0.9, self.state.main_reactor.isotope_ratio - drift)
-        leak = 0.0 if self.state.getter.used_fraction < 0.8 else 0.003
-        self.state.tritium_contamination_grams += leak
+    @property
+    def state(self) -> SimulationModel:
+        return self.model
 
-    def _advance_propulsion(self) -> None:
-        p = self.state.propulsion
-        if not p.online:
-            p.thrust_kn = 0.0
-            return
-        mode_to_target = {"departure": 900.0, "cruise": 520.0, "economy": 220.0, "idle": 0.0}
-        target = mode_to_target.get(p.mode, 0.0)
-        if self.state.thermal_loops["propulsion"].margin < 0 or p.hot_section_temp_c > 920:
-            target *= 0.4
-            self.state.alarms.append("PROPULSION_DERATE")
-        p.thrust_kn += (target - p.thrust_kn) * 0.08
-        p.hot_section_temp_c += p.thrust_kn * 0.002 - 0.6
-        p.hot_section_temp_c = max(120.0, p.hot_section_temp_c)
-        p.hydrogen_kg = max(0.0, p.hydrogen_kg - p.thrust_kn * 0.002)
-        if p.hydrogen_kg <= 0.0:
-            p.online = False
-            self.state.alarms.append("PROP_H2_STARVATION")
-
-    def _advance_eccs(self) -> None:
-        e = self.state.eccs
-        habitat = e.habitat
-        co2_growth = 0.0025 if e.comfort_mode else 0.0012
-        o2_drop = 0.0018 if e.comfort_mode else 0.0008
-        if e.emergency_mode:
-            co2_growth *= 0.7
-            o2_drop *= 0.55
-        habitat.co2_kpa += co2_growth * (5 - self.state.scrubber.beds_ready) * 0.2
-        habitat.o2_kpa -= o2_drop * max(0, 4 - self.state.o2_rack.cassette_online) * 0.2
-        # inward bias toward dirtier zones
-        habitat.contamination_ppm += max(0.0, (e.process.contamination_ppm - habitat.contamination_ppm) * 0.0003)
-        if habitat.co2_kpa > 0.9:
-            self.state.alarms.append("HAB_CO2_HIGH")
-
-    def _advance_scrubber_and_getter(self) -> None:
-        s = self.state.scrubber
-        g = self.state.getter
-        s.regen_quality = max(0.6, s.regen_quality - s.poisoning * 0.0001)
-        eff_capacity = s.beds_total * s.regen_quality - s.poisoning * 0.5
-        s.beds_ready = max(1, int(eff_capacity))
-
-        g.used_fraction = min(1.0, g.used_fraction + 0.0006)
-        g.pressure_drop = min(1.0, g.pressure_drop + 0.0004)
-        g.jam_risk = min(1.0, g.jam_risk + 0.0008 + g.pressure_drop * 0.0002)
-        if g.jam_risk > 0.75:
-            self.state.alarms.append("GETTER_JAM_APPROACH")
-
-    def _advance_o2(self) -> None:
-        rack = self.state.o2_rack
-        if rack.cassette_online < 2 and not rack.branch_bypass_open:
-            self.state.eccs.habitat.o2_kpa -= 0.01
-        rack.purity = max(0.95, rack.purity - (rack.cassette_total - rack.cassette_online) * 0.0002)
-
-    def _advance_lighting_and_signaling(self) -> None:
-        l = self.state.lighting
-        l.lit_egress_routes = max(1, l.egress_routes - l.branch_failures)
-        if l.lit_egress_routes < 2:
-            self.state.alarms.append("EGRESS_MARGIN_LOW")
-        s = self.state.signaling
-        s.emergency_signaling_visible = (not s.dsc_online and l.emergency_path_independent) or s.dsc_online
-
-    def _advance_hab_modules(self) -> None:
-        if not self.state.air_handler.condensate_ok:
-            self.state.eccs.habitat.humidity_pct += 0.03
-            self.state.alarms.append("AHU_CONDENSATE_FAULT")
-        self.state.seating.damper_health = max(0.7, self.state.seating.damper_health - self.state.propulsion.thrust_kn * 0.0000005)
-        flow_loss = self.state.bunk.blocked_branches / max(self.state.bunk.branches, 1)
-        self.state.bunk.local_co2_rise += flow_loss * 0.0005
-
-    def _evaluate_warp_authorization(self) -> None:
-        w = self.state.warp
-        c = self.state.cargo
-        blockers: list[str] = []
-        if not c.geometry_ok:
-            blockers.append("cargo_geometry")
-        if abs(c.centroid_m) > 1.2 or abs(c.pitch_moment) > 300 or abs(c.yaw_moment) > 300 or abs(c.roll_moment) > 300:
-            blockers.append("mass_distribution")
-        if self.state.thermal_loops["warp"].margin < 1.0:
-            blockers.append("warp_thermal")
-        if self.state.tritium_contamination_grams > 80:
-            blockers.append("environmental_clearance")
-        if not w.train_ready or not w.capture_ring_ready or not w.bow_nucleation_ready:
-            blockers.append("hardware_readiness")
-        if self.state.main_reactor.isotope_ratio < 0.94:
-            blockers.append("cryo_or_fuel_quality")
-        w.auth_reason = ",".join(blockers)
+    def step(self, steps: int = 1) -> None:
+        self.runner.step(steps)
 
     def warp_authorized(self) -> bool:
-        return self.state.warp.auth_reason == ""
+        warp: WarpComponent = self.model.ship.systems["warp"]  # type: ignore[assignment]
+        return warp.authorized()
 
     def pre_jump_sequence(self) -> bool:
-        w = self.state.warp
-        if not self.warp_authorized():
-            w.stage = "blocked"
+        warp: WarpComponent = self.model.ship.systems["warp"]  # type: ignore[assignment]
+        if not warp.authorized():
+            warp.stage = "blocked"
             return False
-        if w.antimatter_cartridges < 1:
-            w.stage = "blocked"
-            w.auth_reason = "no_antimatter"
-            return False
-        w.armed = True
-        w.bulk_storage_gj = 600.0
-        w.stage = "aligned"
+        warp.stage = "aligned"
         return True
 
     def execute_nucleation(self) -> bool:
-        w = self.state.warp
-        if w.stage != "aligned":
+        warp: WarpComponent = self.model.ship.systems["warp"]  # type: ignore[assignment]
+        if warp.stage != "aligned":
             return False
-        # Stage-based abort logic prefers survivability
-        if self.state.thermal_loops["warp"].margin < 0:
-            w.stage = "abort_stage_b"
-            w.bulk_storage_gj *= 0.2
-            self.state.alarms.append("WARP_ABORT_STAGE_B")
-            return False
-        w.stage = "sustainment"
-        w.bulk_storage_gj -= 120.0
+        warp.stage = "entry"
         return True
-
-    def safe_getter_extraction(self, brute_force: bool = False) -> bool:
-        g = self.state.getter
-        if brute_force and g.jam_risk > 0.4:
-            self.state.alarms.append("GETTER_BREACH_RISK")
-            return False
-        return g.spring_travel_ok and g.jam_risk < 0.85
-
-    def _inject_fault(self, payload: dict[str, Any]) -> None:
-        key = payload.get("key")
-        if key == "lighting_branch_loss":
-            self.state.lighting.branch_failures += 1
-        elif key == "dsc_failure":
-            self.state.signaling.dsc_online = False
-        elif key == "prop_hot_section":
-            self.state.propulsion.hot_section_temp_c = 980
-        elif key == "o2_cassette_failure":
-            self.state.o2_rack.cassette_online = max(0, self.state.o2_rack.cassette_online - 1)
-        elif key == "getter_jam":
-            self.state.getter.jam_risk = 0.92
-        elif key == "radiator_damage":
-            self.state.thermal_loops["main"].isolated_segments += 2
-
-    def _schedule_maintenance(self, payload: dict[str, Any]) -> None:
-        system = payload["system"]
-        duration_h = payload.get("duration_h", 2)
-        self.state.maintenance[system] = self.state.time_s + duration_h * 3600
