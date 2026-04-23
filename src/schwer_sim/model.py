@@ -1,16 +1,171 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 
+class ResourceType(str, Enum):
+    ELECTRICAL = "electrical"
+    THERMAL = "thermal"
+    OXYGEN = "oxygen"
+    COOLANT = "coolant"
+    PROPELLANT = "propellant"
+    WARP_PLASMA = "warp_plasma"
+
+
+class SignalType(str, Enum):
+    COMMAND = "command"
+    SENSOR = "sensor"
+    AUTHORIZATION = "authorization"
+    SAFETY = "safety"
+
+
+class ServiceClass(str, Enum):
+    CRITICAL = "critical"
+    MISSION = "mission"
+    HABITABILITY = "habitability"
+    AUXILIARY = "auxiliary"
+
+
+class FailureSeverity(str, Enum):
+    NOMINAL = "nominal"
+    DEGRADED = "degraded"
+    LIMITED = "limited"
+    FAILED = "failed"
+
+
+class MaintenanceState(str, Enum):
+    IN_SERVICE = "in_service"
+    SCHEDULED = "scheduled"
+    IN_PROGRESS = "in_progress"
+    LOCKED_OUT = "locked_out"
+
+
 @dataclass
-class ResourceDomain:
+class InterlockRule:
     name: str
-    electrical_mw: float
-    thermal_load_mw: float
-    thermal_rejection_mw: float
-    bus_isolated: bool = False
+    required_true: list[str] = field(default_factory=list)
+
+    def evaluate(self, context: dict[str, bool]) -> bool:
+        return all(context.get(k, False) for k in self.required_true)
+
+
+@dataclass
+class DeratingRule:
+    name: str
+    thermal_margin_min: float
+    minimum_factor: float = 0.5
+
+    def factor(self, thermal_margin: float) -> float:
+        if thermal_margin >= self.thermal_margin_min:
+            return 1.0
+        deficit = self.thermal_margin_min - thermal_margin
+        return max(self.minimum_factor, 1.0 - deficit / max(self.thermal_margin_min * 2, 1.0))
+
+
+@dataclass
+class FailureProfile:
+    wear: float = 0.0
+    severity: FailureSeverity = FailureSeverity.NOMINAL
+    ladder: tuple[float, float, float] = (0.35, 0.65, 0.9)
+
+    def progress(self, wear_rate: float) -> None:
+        self.wear = min(1.0, self.wear + wear_rate)
+        low, med, high = self.ladder
+        if self.wear >= high:
+            self.severity = FailureSeverity.FAILED
+        elif self.wear >= med:
+            self.severity = FailureSeverity.LIMITED
+        elif self.wear >= low:
+            self.severity = FailureSeverity.DEGRADED
+
+
+@dataclass
+class MaintenanceProfile:
+    state: MaintenanceState = MaintenanceState.IN_SERVICE
+    hours_since_service: float = 0.0
+    service_interval_h: float = 1500.0
+
+    def tick(self, dt_h: float) -> None:
+        if self.state == MaintenanceState.IN_SERVICE:
+            self.hours_since_service += dt_h
+            if self.hours_since_service >= self.service_interval_h:
+                self.state = MaintenanceState.SCHEDULED
+
+    def begin(self) -> None:
+        self.state = MaintenanceState.IN_PROGRESS
+
+    def complete(self) -> None:
+        self.state = MaintenanceState.IN_SERVICE
+        self.hours_since_service = 0.0
+
+
+@dataclass
+class Sensor:
+    name: str
+    value: float | bool
+
+
+@dataclass
+class Actuator:
+    name: str
+    command: float | bool
+
+
+@dataclass
+class InterfaceEdge:
+    source: str
+    target: str
+    resource_type: ResourceType
+    capacity: float
+    loss_model: float = 0.0
+    isolation_capability: bool = True
+    contamination_barrier: bool = False
+    redundancy_group: str = ""
+    isolated: bool = False
+
+    def transferable_capacity(self) -> float:
+        if self.isolated:
+            return 0.0
+        return self.capacity * (1.0 - self.loss_model)
+
+
+@dataclass
+class SimComponent:
+    id: str
+    name: str
+    health: float = 1.0
+    operating_mode: str = "nominal"
+    maintenance: MaintenanceProfile = field(default_factory=MaintenanceProfile)
+    failure: FailureProfile = field(default_factory=FailureProfile)
+    sensors: dict[str, Sensor] = field(default_factory=dict)
+    actuators: dict[str, Actuator] = field(default_factory=dict)
+
+    def evaluate_sensors(self) -> None:
+        return
+
+    def evaluate_control(self) -> None:
+        return
+
+    def transfer_resources(self) -> None:
+        return
+
+    def accumulate_wear(self) -> None:
+        return
+
+    def evaluate_failures(self) -> None:
+        self.failure.progress(0.0)
+        self.health = max(0.0, 1.0 - self.failure.wear)
+
+
+@dataclass
+class DomainModel:
+    name: str
+    domain_type: str
+    electrical_mw: float = 0.0
+    thermal_load_mw: float = 0.0
+    thermal_rejection_mw: float = 0.0
 
     @property
     def thermal_margin_mw(self) -> float:
@@ -18,246 +173,414 @@ class ResourceDomain:
 
 
 @dataclass
-class AtmosphereZone:
+class ZoneNode:
+    id: str
+    zone_type: str
+
+
+@dataclass
+class ComponentNode:
+    id: str
+    component_id: str
+
+
+@dataclass
+class AssemblyNode:
+    id: str
+    assembly_name: str
+
+
+@dataclass
+class ControllerNode:
+    id: str
+    control_domain: str
+
+
+@dataclass
+class StorageNode:
+    id: str
+    storage_type: ResourceType
+    capacity: float
+
+
+@dataclass
+class InterfaceNode:
+    id: str
+    service_class: ServiceClass
+
+
+@dataclass
+class ScenarioEvent:
+    tick: int
+    event_type: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SystemNode:
+    id: str
     name: str
-    o2_kpa: float
-    co2_kpa: float
-    humidity_pct: float
-    pressure_kpa: float
-    contamination_ppm: float
 
 
 @dataclass
-class ReactorState:
-    output_mw: float
-    max_mw: float
-    derate: float = 1.0
-    cryo_ready: bool = True
-    isotope_ratio: float = 1.0
-    maintenance_due_hours: float = 2000.0
-
-
-@dataclass
-class PropulsionState:
-    mode: str = "idle"
-    hydrogen_kg: float = 180000.0
-    thrust_kn: float = 0.0
-    hot_section_temp_c: float = 200.0
-    nozzle_health: float = 1.0
-    plasma_stability: float = 1.0
-    online: bool = True
-
-
-@dataclass
-class ThermalLoop:
+class SubsystemNode:
+    id: str
+    parent_system_id: str
     name: str
-    load_mw: float
-    reject_mw: float
-    isolated_segments: int = 0
-    total_segments: int = 6
-
-    @property
-    def margin(self) -> float:
-        reduction = (self.isolated_segments / max(self.total_segments, 1)) * 0.5
-        return self.reject_mw * (1 - reduction) - self.load_mw
 
 
 @dataclass
-class CargoState:
-    mass_tonnes: float
-    centroid_m: float
-    pitch_moment: float
-    yaw_moment: float
-    roll_moment: float
-    ballast_state: float = 0.0
-    geometry_ok: bool = True
+class EccsComponent(SimComponent):
+    zone_pressure_ok: bool = True
+    no_leak: bool = True
+    panel_closed: bool = True
+    blower_ok: bool = True
+    drain_ok: bool = True
+    valve_valid: bool = True
+    thermal_margin: float = 4.0
+    no_freeze_risk: bool = True
+    docked: bool = True
+    latched: bool = True
+    coolant: bool = True
+    safe_headers: bool = True
+    power_ok: bool = True
+    cassette_enable: bool = True
+    air_handler_enable: bool = True
+    air_handler_cooling: bool = True
+
+    o2_interlock: InterlockRule = field(
+        default_factory=lambda: InterlockRule(
+            "o2_cassette_enable",
+            ["Docked", "Latched", "Coolant", "SafeHeaders", "NoLeak", "PowerOK"],
+        )
+    )
+    air_handler_interlock: InterlockRule = field(
+        default_factory=lambda: InterlockRule(
+            "ahu_enable",
+            ["PanelClosed", "Blower_OK", "Drain_OK", "No_Leak", "Valve_Valid", "Zone_Pressure_OK"],
+        )
+    )
+    thermal_derating: DeratingRule = field(default_factory=lambda: DeratingRule("ahu_thermal", thermal_margin_min=2.0))
+
+    def evaluate_control(self) -> None:
+        self.cassette_enable = self.o2_interlock.evaluate(
+            {
+                "Docked": self.docked,
+                "Latched": self.latched,
+                "Coolant": self.coolant,
+                "SafeHeaders": self.safe_headers,
+                "NoLeak": self.no_leak,
+                "PowerOK": self.power_ok,
+            }
+        )
+        self.air_handler_enable = self.air_handler_interlock.evaluate(
+            {
+                "PanelClosed": self.panel_closed,
+                "Blower_OK": self.blower_ok,
+                "Drain_OK": self.drain_ok,
+                "No_Leak": self.no_leak,
+                "Valve_Valid": self.valve_valid,
+                "Zone_Pressure_OK": self.zone_pressure_ok,
+            }
+        )
+        self.air_handler_cooling = (
+            self.air_handler_enable and self.thermal_margin > 0 and self.no_freeze_risk
+        )
+        factor = self.thermal_derating.factor(self.thermal_margin)
+        self.operating_mode = "safe" if not self.air_handler_enable else ("derated" if factor < 1.0 else "nominal")
+
+    def accumulate_wear(self) -> None:
+        wear_rate = 0.0003 if self.air_handler_cooling else 0.0006
+        self.failure.progress(wear_rate)
+
+    def evaluate_failures(self) -> None:
+        self.health = max(0.0, 1.0 - self.failure.wear)
+        if self.failure.severity in (FailureSeverity.LIMITED, FailureSeverity.FAILED):
+            self.air_handler_cooling = False
 
 
 @dataclass
-class WarpState:
-    antimatter_cartridges: int = 4
-    train_ready: bool = True
-    conversion_online: bool = True
-    bulk_storage_gj: float = 0.0
-    pulse_network_ready: bool = True
-    bow_nucleation_ready: bool = True
-    capture_ring_ready: bool = True
-    ring_stations_ready: int = 8
-    stage: str = "idle"
-    auth_reason: str = ""
-    armed: bool = False
+class LightingComponent(SimComponent):
+    total_branches: int = 3
+    failed_branches: int = 0
+    critical_routes: int = 2
+    lit_critical_routes: int = 2
+
+    def evaluate_control(self) -> None:
+        self.lit_critical_routes = max(1, self.critical_routes - min(self.failed_branches, 1))
+        self.operating_mode = "nominal" if self.failed_branches == 0 else "degraded"
 
 
 @dataclass
-class EccsState:
-    habitat: AtmosphereZone = field(default_factory=lambda: AtmosphereZone("habitat", 21.1, 0.45, 45.0, 101.2, 20.0))
-    cargo: AtmosphereZone = field(default_factory=lambda: AtmosphereZone("cargo", 20.0, 0.5, 55.0, 100.8, 60.0))
-    process: AtmosphereZone = field(default_factory=lambda: AtmosphereZone("process", 19.5, 0.7, 60.0, 100.0, 140.0))
-    comfort_mode: bool = True
-    emergency_mode: bool = False
-
-
-@dataclass
-class ScrubberTrain:
-    beds_total: int = 4
-    beds_ready: int = 4
-    poisoning: float = 0.0
-    regen_quality: float = 1.0
-
-
-@dataclass
-class GetterCartridge:
-    uptake_capacity: float = 1.0
-    used_fraction: float = 0.5
-    poisoning: float = 0.0
-    pressure_drop: float = 0.1
-    jam_risk: float = 0.1
-    spring_travel_ok: bool = True
-
-
-@dataclass
-class O2Rack:
-    cassette_total: int = 6
-    cassette_online: int = 6
-    branch_bypass_open: bool = False
-    purity: float = 0.995
-
-
-@dataclass
-class AirHandlerModule:
-    blower_health: float = 1.0
-    condensate_ok: bool = True
-    enabled: bool = True
-
-
-@dataclass
-class LightingState:
-    egress_routes: int = 3
-    lit_egress_routes: int = 3
-    emergency_path_independent: bool = True
-    branch_failures: int = 0
-
-
-@dataclass
-class DisplaySignalingState:
+class SignalingComponent(SimComponent):
     dsc_online: bool = True
-    emergency_signaling_visible: bool = True
+    independent_safety_path: bool = True
+    emergency_visible: bool = True
+
+    def evaluate_control(self) -> None:
+        self.emergency_visible = self.independent_safety_path or self.dsc_online
+        self.operating_mode = "nominal" if self.emergency_visible else "failed"
 
 
 @dataclass
-class SeatingState:
-    mount_health: float = 1.0
-    damper_health: float = 1.0
-    restraint_health: float = 1.0
+class BunkArrayComponent(SimComponent):
+    external_airflow_ratio: float = 1.0
+    pressure_gradient_ok: bool = True
+    pressure_hierarchy_preserved: bool = True
+
+    def evaluate_control(self) -> None:
+        self.pressure_hierarchy_preserved = self.external_airflow_ratio > 0.0 and self.pressure_gradient_ok
+        self.operating_mode = "nominal" if self.pressure_hierarchy_preserved else "safe"
 
 
 @dataclass
-class BunkState:
-    branches: int = 8
-    blocked_branches: int = 0
-    local_co2_rise: float = 0.0
+class WarpComponent(SimComponent):
+    auth_mass: bool = True
+    auth_thermal: bool = True
+    auth_hardware: bool = True
+    auth_command: bool = True
+    stage: str = "idle"
+
+    def authorized(self) -> bool:
+        return self.auth_mass and self.auth_thermal and self.auth_hardware and self.auth_command
+
+    def evaluate_control(self) -> None:
+        if not self.authorized():
+            self.stage = "blocked"
+            self.operating_mode = "safe"
+        elif self.stage == "idle":
+            self.operating_mode = "nominal"
+
+    def staged_abort(self, thermal_violation: bool) -> None:
+        if thermal_violation and self.stage in {"aligned", "entry"}:
+            self.stage = "abort_stage_b"
+            self.operating_mode = "safe"
 
 
 @dataclass
-class SimulationState:
-    time_s: float = 0.0
-    main_power: ResourceDomain = field(default_factory=lambda: ResourceDomain("main", 48.0, 31.0, 39.0))
-    propulsion_power: ResourceDomain = field(default_factory=lambda: ResourceDomain("propulsion", 62.0, 50.0, 57.0))
-    warp_power: ResourceDomain = field(default_factory=lambda: ResourceDomain("warp", 0.0, 8.0, 14.0))
-    main_reactor: ReactorState = field(default_factory=lambda: ReactorState(48.0, 60.0))
-    propulsion_reactor: ReactorState = field(default_factory=lambda: ReactorState(62.0, 90.0))
-    propulsion: PropulsionState = field(default_factory=PropulsionState)
-    thermal_loops: dict[str, ThermalLoop] = field(
+class ShipModel:
+    systems: dict[str, SimComponent] = field(default_factory=dict)
+
+
+@dataclass
+class SimulationModel:
+    schema_version: int = 2
+    tick: int = 0
+    dt_seconds: float = 1.0
+    domains: dict[str, DomainModel] = field(
         default_factory=lambda: {
-            "main": ThermalLoop("main", 31.0, 39.0),
-            "propulsion": ThermalLoop("propulsion", 50.0, 57.0),
-            "warp": ThermalLoop("warp", 8.0, 14.0),
-            "emergency": ThermalLoop("emergency", 0.0, 10.0),
+            "main": DomainModel("Main Ship Power Domain", "major", electrical_mw=48.0, thermal_load_mw=30.0, thermal_rejection_mw=38.0),
+            "sublight": DomainModel("Sublight Propulsion Domain", "major", electrical_mw=62.0, thermal_load_mw=50.0, thermal_rejection_mw=57.0),
+            "warp": DomainModel("Warp Domain", "major", electrical_mw=0.0, thermal_load_mw=8.0, thermal_rejection_mw=14.0),
+            "maneuver": DomainModel("Maneuvering/Docking", "minor", electrical_mw=6.0, thermal_load_mw=4.0, thermal_rejection_mw=5.0),
+            "survivability": DomainModel("Emergency Survivability", "minor", electrical_mw=4.0, thermal_load_mw=2.0, thermal_rejection_mw=6.0),
         }
     )
-    tritium_inventory_kg: float = 430.0
-    tritium_contamination_grams: float = 0.0
-    cargo: CargoState = field(default_factory=lambda: CargoState(28000.0, 0.0, 0.0, 0.0, 0.0))
-    warp: WarpState = field(default_factory=WarpState)
-    eccs: EccsState = field(default_factory=EccsState)
-    scrubber: ScrubberTrain = field(default_factory=ScrubberTrain)
-    getter: GetterCartridge = field(default_factory=GetterCartridge)
-    o2_rack: O2Rack = field(default_factory=O2Rack)
-    air_handler: AirHandlerModule = field(default_factory=AirHandlerModule)
-    lighting: LightingState = field(default_factory=LightingState)
-    signaling: DisplaySignalingState = field(default_factory=DisplaySignalingState)
-    seating: SeatingState = field(default_factory=SeatingState)
-    bunk: BunkState = field(default_factory=BunkState)
+    ship: ShipModel = field(
+        default_factory=lambda: ShipModel(
+            systems={
+                "eccs": EccsComponent(id="eccs", name="ECCS / HECS"),
+                "lighting": LightingComponent(id="lighting", name="Lighting System"),
+                "sdss": SignalingComponent(id="sdss", name="Display Signaling System"),
+                "bas": BunkArrayComponent(id="bas", name="Bunk Array System"),
+                "warp": WarpComponent(id="warp", name="Warp System"),
+            }
+        )
+    )
+    interfaces: list[InterfaceEdge] = field(default_factory=list)
     alarms: list[str] = field(default_factory=list)
-    maintenance: dict[str, float] = field(default_factory=dict)
-    sandbox: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        eccs = self.ship.systems["eccs"]
+        lighting = self.ship.systems["lighting"]
+        sdss = self.ship.systems["sdss"]
+        bas = self.ship.systems["bas"]
+        warp = self.ship.systems["warp"]
         return {
-            "time_s": self.time_s,
-            "main_power": self.main_power.__dict__,
-            "propulsion_power": self.propulsion_power.__dict__,
-            "warp_power": self.warp_power.__dict__,
-            "main_reactor": self.main_reactor.__dict__,
-            "propulsion_reactor": self.propulsion_reactor.__dict__,
-            "propulsion": self.propulsion.__dict__,
-            "thermal_loops": {k: v.__dict__ for k, v in self.thermal_loops.items()},
-            "tritium_inventory_kg": self.tritium_inventory_kg,
-            "tritium_contamination_grams": self.tritium_contamination_grams,
-            "cargo": self.cargo.__dict__,
-            "warp": self.warp.__dict__,
-            "eccs": {
-                "habitat": self.eccs.habitat.__dict__,
-                "cargo": self.eccs.cargo.__dict__,
-                "process": self.eccs.process.__dict__,
-                "comfort_mode": self.eccs.comfort_mode,
-                "emergency_mode": self.eccs.emergency_mode,
+            "schema_version": self.schema_version,
+            "tick": self.tick,
+            "dt_seconds": self.dt_seconds,
+            "domains": {k: v.__dict__ for k, v in self.domains.items()},
+            "ship": {
+                "systems": {
+                    "eccs": {
+                        "id": eccs.id,
+                        "name": eccs.name,
+                        "health": eccs.health,
+                        "operating_mode": eccs.operating_mode,
+                        "maintenance": {
+                            "state": eccs.maintenance.state.value,
+                            "hours_since_service": eccs.maintenance.hours_since_service,
+                            "service_interval_h": eccs.maintenance.service_interval_h,
+                        },
+                        "failure": {
+                            "wear": eccs.failure.wear,
+                            "severity": eccs.failure.severity.value,
+                            "ladder": list(eccs.failure.ladder),
+                        },
+                        "states": {
+                            "zone_pressure_ok": eccs.zone_pressure_ok,
+                            "no_leak": eccs.no_leak,
+                            "panel_closed": eccs.panel_closed,
+                            "blower_ok": eccs.blower_ok,
+                            "drain_ok": eccs.drain_ok,
+                            "valve_valid": eccs.valve_valid,
+                            "thermal_margin": eccs.thermal_margin,
+                            "no_freeze_risk": eccs.no_freeze_risk,
+                            "docked": eccs.docked,
+                            "latched": eccs.latched,
+                            "coolant": eccs.coolant,
+                            "safe_headers": eccs.safe_headers,
+                            "power_ok": eccs.power_ok,
+                            "cassette_enable": eccs.cassette_enable,
+                            "air_handler_enable": eccs.air_handler_enable,
+                            "air_handler_cooling": eccs.air_handler_cooling,
+                        },
+                        "lighting": {
+                            "failed_branches": lighting.failed_branches,
+                            "lit_critical_routes": lighting.lit_critical_routes,
+                            "critical_routes": lighting.critical_routes,
+                        },
+                        "sdss": {
+                            "dsc_online": sdss.dsc_online,
+                            "independent_safety_path": sdss.independent_safety_path,
+                            "emergency_visible": sdss.emergency_visible,
+                        },
+                        "bas": {
+                            "external_airflow_ratio": bas.external_airflow_ratio,
+                            "pressure_gradient_ok": bas.pressure_gradient_ok,
+                            "pressure_hierarchy_preserved": bas.pressure_hierarchy_preserved,
+                        },
+                        "warp": {
+                            "auth_mass": warp.auth_mass,
+                            "auth_thermal": warp.auth_thermal,
+                            "auth_hardware": warp.auth_hardware,
+                            "auth_command": warp.auth_command,
+                            "stage": warp.stage,
+                        },
+                    }
+                }
             },
-            "scrubber": self.scrubber.__dict__,
-            "getter": self.getter.__dict__,
-            "o2_rack": self.o2_rack.__dict__,
-            "air_handler": self.air_handler.__dict__,
-            "lighting": self.lighting.__dict__,
-            "signaling": self.signaling.__dict__,
-            "seating": self.seating.__dict__,
-            "bunk": self.bunk.__dict__,
+            "interfaces": [
+                {
+                    "source": i.source,
+                    "target": i.target,
+                    "resource_type": i.resource_type.value,
+                    "capacity": i.capacity,
+                    "loss_model": i.loss_model,
+                    "isolation_capability": i.isolation_capability,
+                    "contamination_barrier": i.contamination_barrier,
+                    "redundancy_group": i.redundancy_group,
+                    "isolated": i.isolated,
+                }
+                for i in self.interfaces
+            ],
             "alarms": self.alarms,
-            "maintenance": self.maintenance,
-            "sandbox": self.sandbox,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SimulationState":
-        s = cls()
-        s.time_s = data.get("time_s", 0.0)
-        s.main_power = ResourceDomain(**data["main_power"])
-        s.propulsion_power = ResourceDomain(**data["propulsion_power"])
-        s.warp_power = ResourceDomain(**data["warp_power"])
-        s.main_reactor = ReactorState(**data["main_reactor"])
-        s.propulsion_reactor = ReactorState(**data["propulsion_reactor"])
-        s.propulsion = PropulsionState(**data["propulsion"])
-        s.thermal_loops = {k: ThermalLoop(**v) for k, v in data["thermal_loops"].items()}
-        s.tritium_inventory_kg = data["tritium_inventory_kg"]
-        s.tritium_contamination_grams = data["tritium_contamination_grams"]
-        s.cargo = CargoState(**data["cargo"])
-        s.warp = WarpState(**data["warp"])
-        e = data["eccs"]
-        s.eccs = EccsState(
-            habitat=AtmosphereZone(**e["habitat"]),
-            cargo=AtmosphereZone(**e["cargo"]),
-            process=AtmosphereZone(**e["process"]),
-            comfort_mode=e["comfort_mode"],
-            emergency_mode=e["emergency_mode"],
+    def from_dict(cls, data: dict[str, Any]) -> "SimulationModel":
+        if data.get("schema_version", 1) < 2:
+            raise ValueError("V1 data must be loaded through adapter")
+        model = cls()
+        model.tick = data.get("tick", 0)
+        model.dt_seconds = data.get("dt_seconds", 1.0)
+        model.domains = {k: DomainModel(**v) for k, v in data.get("domains", {}).items()}
+
+        eccs_data = data.get("ship", {}).get("systems", {}).get("eccs", {})
+        eccs = EccsComponent(id=eccs_data.get("id", "eccs"), name=eccs_data.get("name", "ECCS / HECS"))
+        maint = eccs_data.get("maintenance", {})
+        eccs.maintenance = MaintenanceProfile(
+            state=MaintenanceState(maint.get("state", MaintenanceState.IN_SERVICE.value)),
+            hours_since_service=maint.get("hours_since_service", 0.0),
+            service_interval_h=maint.get("service_interval_h", 1500.0),
         )
-        s.scrubber = ScrubberTrain(**data["scrubber"])
-        s.getter = GetterCartridge(**data["getter"])
-        s.o2_rack = O2Rack(**data["o2_rack"])
-        s.air_handler = AirHandlerModule(**data["air_handler"])
-        s.lighting = LightingState(**data["lighting"])
-        s.signaling = DisplaySignalingState(**data["signaling"])
-        s.seating = SeatingState(**data["seating"])
-        s.bunk = BunkState(**data["bunk"])
-        s.alarms = list(data.get("alarms", []))
-        s.maintenance = dict(data.get("maintenance", {}))
-        s.sandbox = data.get("sandbox", False)
-        return s
+        fail = eccs_data.get("failure", {})
+        eccs.failure = FailureProfile(
+            wear=fail.get("wear", 0.0),
+            severity=FailureSeverity(fail.get("severity", FailureSeverity.NOMINAL.value)),
+            ladder=tuple(fail.get("ladder", [0.35, 0.65, 0.9])),
+        )
+        states = eccs_data.get("states", {})
+        for key, value in states.items():
+            if hasattr(eccs, key):
+                setattr(eccs, key, value)
+        eccs.health = eccs_data.get("health", 1.0)
+        eccs.operating_mode = eccs_data.get("operating_mode", "nominal")
+
+        systems = data.get("ship", {}).get("systems", {})
+        lighting_data = systems.get("lighting", {})
+        sdss_data = systems.get("sdss", {})
+        bas_data = systems.get("bas", {})
+        warp_data = systems.get("warp", {})
+        lighting = LightingComponent(id="lighting", name="Lighting System")
+        lighting.failed_branches = lighting_data.get("failed_branches", 0)
+        lighting.lit_critical_routes = lighting_data.get("lit_critical_routes", 2)
+        lighting.critical_routes = lighting_data.get("critical_routes", 2)
+        sdss = SignalingComponent(id="sdss", name="Display Signaling System")
+        sdss.dsc_online = sdss_data.get("dsc_online", True)
+        sdss.independent_safety_path = sdss_data.get("independent_safety_path", True)
+        sdss.emergency_visible = sdss_data.get("emergency_visible", True)
+        bas = BunkArrayComponent(id="bas", name="Bunk Array System")
+        bas.external_airflow_ratio = bas_data.get("external_airflow_ratio", 1.0)
+        bas.pressure_gradient_ok = bas_data.get("pressure_gradient_ok", True)
+        bas.pressure_hierarchy_preserved = bas_data.get("pressure_hierarchy_preserved", True)
+        warp = WarpComponent(id="warp", name="Warp System")
+        warp.auth_mass = warp_data.get("auth_mass", True)
+        warp.auth_thermal = warp_data.get("auth_thermal", True)
+        warp.auth_hardware = warp_data.get("auth_hardware", True)
+        warp.auth_command = warp_data.get("auth_command", True)
+        warp.stage = warp_data.get("stage", "idle")
+
+        model.ship = ShipModel(systems={"eccs": eccs, "lighting": lighting, "sdss": sdss, "bas": bas, "warp": warp})
+        model.interfaces = [
+            InterfaceEdge(
+                source=i["source"],
+                target=i["target"],
+                resource_type=ResourceType(i["resource_type"]),
+                capacity=i["capacity"],
+                loss_model=i.get("loss_model", 0.0),
+                isolation_capability=i.get("isolation_capability", True),
+                contamination_barrier=i.get("contamination_barrier", False),
+                redundancy_group=i.get("redundancy_group", ""),
+                isolated=i.get("isolated", False),
+            )
+            for i in data.get("interfaces", [])
+        ]
+        model.alarms = list(data.get("alarms", []))
+        return model
+
+
+@dataclass
+class LegacyNetworkV1:
+    nodes: list[dict[str, Any]] = field(default_factory=list)
+    edges: list[dict[str, Any]] = field(default_factory=list)
+    traffic: list[dict[str, Any]] = field(default_factory=list)
+
+
+class V1ToV2Adapter:
+    @staticmethod
+    def adapt(network: LegacyNetworkV1) -> SimulationModel:
+        model = SimulationModel()
+        provisional_components = [n for n in network.nodes if n.get("kind") == "component"]
+        if provisional_components:
+            model.ship.systems["eccs"].name = provisional_components[0].get("name", "ECCS / HECS")
+        for edge in network.edges:
+            resource = edge.get("traffic", "electrical")
+            try:
+                resource_type = ResourceType(resource)
+            except ValueError:
+                resource_type = ResourceType.ELECTRICAL
+            model.interfaces.append(
+                InterfaceEdge(
+                    source=edge.get("source", "legacy_a"),
+                    target=edge.get("target", "legacy_b"),
+                    resource_type=resource_type,
+                    capacity=float(edge.get("capacity", 1.0)),
+                    loss_model=float(edge.get("loss", 0.0)),
+                    isolation_capability=bool(edge.get("isolatable", True)),
+                    contamination_barrier=bool(edge.get("barrier", False)),
+                    redundancy_group=str(edge.get("redundancy", "legacy")),
+                )
+            )
+        return model

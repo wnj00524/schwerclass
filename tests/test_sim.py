@@ -1,3 +1,9 @@
+from schwer_sim.model import (
+    InterfaceEdge,
+    MaintenanceState,
+    ResourceType,
+    ScenarioEvent,
+)
 from schwer_sim.sim import SchwerSimulation
 
 
@@ -10,71 +16,129 @@ def test_deterministic_repeatability_from_seed() -> None:
     assert a.state.to_dict() == b.state.to_dict()
 
 
-def test_lighting_branch_loss_keeps_egress_route() -> None:
+def test_interlock_o2_cassette_formula() -> None:
     sim = SchwerSimulation()
-    sim.engine.schedule(0, "inject_fault", {"key": "lighting_branch_loss"})
+    eccs = sim.state.ship.systems["eccs"]
+    eccs.docked = True
+    eccs.latched = True
+    eccs.coolant = True
+    eccs.safe_headers = True
+    eccs.no_leak = True
+    eccs.power_ok = True
     sim.step()
-    assert sim.state.lighting.lit_egress_routes >= 1
+    assert eccs.cassette_enable
 
-
-def test_propulsion_loss_not_remove_ship_service_power() -> None:
-    sim = SchwerSimulation()
-    sim.state.propulsion.online = False
-    sim.step(10)
-    assert sim.state.main_power.electrical_mw > 0
-
-
-def test_cargo_imbalance_blocks_warp_authorization() -> None:
-    sim = SchwerSimulation()
-    sim.state.cargo.centroid_m = 2.5
+    eccs.no_leak = False
     sim.step()
-    assert not sim.warp_authorized()
-    assert "mass_distribution" in sim.state.warp.auth_reason
+    assert not eccs.cassette_enable
 
 
-def test_emergency_atmosphere_preserves_o2_co2_longer_than_comfort() -> None:
-    comfort = SchwerSimulation()
-    comfort.state.scrubber.beds_ready = 1
-    comfort.state.o2_rack.cassette_online = 1
-    comfort.state.eccs.comfort_mode = True
-
-    emergency = SchwerSimulation()
-    emergency.state.scrubber.beds_ready = 1
-    emergency.state.o2_rack.cassette_online = 1
-    emergency.state.eccs.comfort_mode = False
-    emergency.state.eccs.emergency_mode = True
-
-    comfort.step(400)
-    emergency.step(400)
-
-    assert emergency.state.eccs.habitat.co2_kpa <= comfort.state.eccs.habitat.co2_kpa
-    assert emergency.state.eccs.habitat.o2_kpa >= comfort.state.eccs.habitat.o2_kpa
-
-
-def test_o2_cassette_fault_isolates_at_branch_level() -> None:
+def test_failure_ladder_progression_not_binary() -> None:
     sim = SchwerSimulation()
-    sim.engine.schedule(0, "inject_fault", {"key": "o2_cassette_failure"})
+    eccs = sim.state.ship.systems["eccs"]
+    eccs.no_freeze_risk = False
+    sim.step(1200)
+    assert eccs.failure.wear > 0.35
+    assert eccs.failure.severity.value in {"degraded", "limited", "failed"}
+
+
+def test_thermal_derating() -> None:
+    sim = SchwerSimulation()
+    eccs = sim.state.ship.systems["eccs"]
+    sim.state.domains["main"].thermal_rejection_mw = 30.5
+    sim.step(2)
+    assert eccs.operating_mode in {"derated", "safe"}
+
+
+def test_isolation_behavior_single_branch_loss_survivable() -> None:
+    sim = SchwerSimulation()
+    sim.state.interfaces = [
+        InterfaceEdge("a", "b", ResourceType.ELECTRICAL, 10.0, redundancy_group="critical_1"),
+        InterfaceEdge("a", "c", ResourceType.ELECTRICAL, 10.0, redundancy_group="critical_2"),
+    ]
+    sim.runner.event.schedule(ScenarioEvent(tick=0, event_type="scenario_event", payload={"event_type": "isolate_interface", "group": "critical_1"}))
     sim.step()
-    assert sim.state.o2_rack.cassette_online == 5
-    assert sim.state.o2_rack.cassette_online > 0
+    capacities = [e.transferable_capacity() for e in sim.state.interfaces]
+    assert capacities[0] == 0.0
+    assert capacities[1] > 0.0
 
 
-def test_jammed_getter_recovery_refuses_unsafe_brute_extraction() -> None:
+def test_maintenance_state_transitions() -> None:
     sim = SchwerSimulation()
-    sim.state.getter.jam_risk = 0.8
-    assert not sim.safe_getter_extraction(brute_force=True)
+    eccs = sim.state.ship.systems["eccs"]
+    eccs.maintenance.service_interval_h = 0.0001
+    sim.step(2)
+    assert eccs.maintenance.state == MaintenanceState.SCHEDULED
 
-
-def test_emergency_signaling_visible_after_dsc_failure() -> None:
-    sim = SchwerSimulation()
-    sim.engine.schedule(0, "inject_fault", {"key": "dsc_failure"})
+    sim.runner.event.schedule(ScenarioEvent(tick=0, event_type="scenario_event", payload={"event_type": "maintenance_begin"}))
     sim.step()
-    assert sim.state.signaling.emergency_signaling_visible
+    assert eccs.maintenance.state == MaintenanceState.IN_PROGRESS
+
+    eccs.maintenance.service_interval_h = 5.0
+    sim.runner.event.schedule(ScenarioEvent(tick=0, event_type="scenario_event", payload={"event_type": "maintenance_complete"}))
+    sim.step()
+    assert eccs.maintenance.state == MaintenanceState.IN_SERVICE
 
 
-def test_thermal_overload_causes_derating_not_collapse() -> None:
+def test_v1_loader_adapter() -> None:
+    from schwer_sim.persistence import ScenarioStore
+    import json
+    import tempfile
+    from pathlib import Path
+
+    legacy = {
+        "metadata": {"name": "legacy"},
+        "state": {
+            "nodes": [{"kind": "component", "name": "Legacy ECCS"}],
+            "edges": [{"source": "n1", "target": "n2", "traffic": "electrical", "capacity": 2.0}],
+            "traffic": [],
+        },
+    }
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "legacy.json"
+        p.write_text(json.dumps(legacy))
+        _, model = ScenarioStore.load(p)
+
+    assert model.schema_version == 2
+    assert model.ship.systems["eccs"].name == "Legacy ECCS"
+    assert len(model.interfaces) == 1
+
+
+def test_lighting_branch_segmentation_survives_single_loss() -> None:
     sim = SchwerSimulation()
-    sim.state.thermal_loops["main"].isolated_segments = 5
-    sim.step(100)
-    assert sim.state.main_reactor.derate < 1.0
-    assert sim.state.main_power.electrical_mw > 0
+    sim.runner.event.schedule(ScenarioEvent(tick=0, event_type="scenario_event", payload={"event_type": "lighting_branch_loss"}))
+    sim.step()
+    lighting = sim.state.ship.systems["lighting"]
+    assert lighting.lit_critical_routes >= 1
+
+
+def test_sdss_safety_path_independent_from_dsc() -> None:
+    sim = SchwerSimulation()
+    sim.runner.event.schedule(ScenarioEvent(tick=0, event_type="scenario_event", payload={"event_type": "dsc_failure"}))
+    sim.step()
+    sdss = sim.state.ship.systems["sdss"]
+    assert sdss.emergency_visible
+
+
+def test_bas_enforces_nonzero_external_airflow() -> None:
+    sim = SchwerSimulation()
+    bas = sim.state.ship.systems["bas"]
+    bas.external_airflow_ratio = 0.0
+    sim.step()
+    assert not bas.pressure_hierarchy_preserved
+    assert "BAS_PRESSURE_HIERARCHY_FAULT" in sim.state.alarms
+
+
+def test_warp_requires_authorization_and_supports_staged_abort() -> None:
+    sim = SchwerSimulation()
+    warp = sim.state.ship.systems["warp"]
+    warp.auth_command = False
+    assert not sim.pre_jump_sequence()
+    assert warp.stage == "blocked"
+
+    warp.auth_command = True
+    assert sim.pre_jump_sequence()
+    sim.state.domains["warp"].thermal_rejection_mw = 6.0
+    sim.state.domains["warp"].thermal_load_mw = 8.0
+    sim.step()
+    assert warp.stage == "abort_stage_b"
